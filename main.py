@@ -15,7 +15,7 @@ load_dotenv()
 # Get environment variables
 API_TOKEN = os.getenv('BOT_TOKEN')
 MONGO_URI = os.getenv('MONGO_URI')
-ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID'))
+MAIN_ADMIN_ID = int(os.getenv('MAIN_ADMIN_ID'))
 DB_NAME = 'attendance_db'
 
 # Initialize bot and dispatcher
@@ -29,6 +29,9 @@ db = client[DB_NAME]
 
 class AttendanceStates(StatesGroup):
     waiting_for_confirmation = State()
+
+class AdminStates(StatesGroup):
+    waiting_for_new_admin_id = State()
 
 # Create keyboard markup
 attendance_markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
@@ -70,9 +73,13 @@ async def process_attendance(message: types.Message, state: FSMContext):
     await state.finish()
     await message.reply(f"Your attendance has been recorded as '{status}'. Thank you!", reply_markup=types.ReplyKeyboardRemove())
 
+async def is_admin(user_id: int) -> bool:
+    admin = await db.admins.find_one({'user_id': user_id})
+    return admin is not None
+
 @dp.message_handler(commands=['report'])
 async def send_report(message: types.Message):
-    if message.from_user.id != ADMIN_USER_ID:
+    if not await is_admin(message.from_user.id):
         await message.reply("Sorry, only admins can access the attendance report.")
         return
 
@@ -85,12 +92,16 @@ async def send_report(message: types.Message):
     late_list = []
 
     async for doc in cursor:
-        if doc['status'] == 'Present':
-            present_list.append(f"- {doc['username']} (ID: {doc['user_id']})")
-        elif doc['status'] == 'Absent':
-            absent_list.append(f"- {doc['username']} (ID: {doc['user_id']})")
-        else:  # Late
-            late_list.append(f"- {doc['username']} (ID: {doc['user_id']})")
+        status = doc.get('status', 'Unknown')  # Use get() method with a default value
+        username = doc.get('username', 'Unknown')
+        user_id = doc.get('user_id', 'Unknown')
+
+        if status == 'Present':
+            present_list.append(f"- {username} (ID: {user_id})")
+        elif status == 'Absent':
+            absent_list.append(f"- {username} (ID: {user_id})")
+        elif status == "I'm late":
+            late_list.append(f"- {username} (ID: {user_id})")
 
     report += "Present:\n" + "\n".join(present_list) + f"\n\nTotal Present: {len(present_list)}\n\n"
     report += "Absent:\n" + "\n".join(absent_list) + f"\n\nTotal Absent: {len(absent_list)}\n\n"
@@ -98,7 +109,52 @@ async def send_report(message: types.Message):
 
     await message.reply(report)
 
+@dp.message_handler(commands=['add_admin'])
+async def start_add_admin(message: types.Message):
+    if message.from_user.id != MAIN_ADMIN_ID:
+        await message.reply("Sorry, only the main admin can add new admins.")
+        return
+
+    await AdminStates.waiting_for_new_admin_id.set()
+    await message.reply("Please enter the user ID of the new admin.")
+
+@dp.message_handler(state=AdminStates.waiting_for_new_admin_id)
+async def process_new_admin(message: types.Message, state: FSMContext):
+    try:
+        new_admin_id = int(message.text)
+    except ValueError:
+        await message.reply("Please enter a valid user ID (numbers only).")
+        return
+
+    await db.admins.update_one(
+        {'user_id': new_admin_id},
+        {'$set': {'user_id': new_admin_id}},
+        upsert=True
+    )
+
+    await state.finish()
+    await message.reply(f"User with ID {new_admin_id} has been added as an admin.")
+
+@dp.message_handler(commands=['list_admins'])
+async def list_admins(message: types.Message):
+    if not await is_admin(message.from_user.id):
+        await message.reply("Sorry, only admins can view the list of admins.")
+        return
+
+    cursor = db.admins.find()
+    admin_list = ["Admin List:\n"]
+    async for doc in cursor:
+        admin_list.append(f"- User ID: {doc['user_id']}")
+
+    await message.reply("\n".join(admin_list))
+
 async def main():
+    # Ensure main admin is in the database
+    await db.admins.update_one(
+        {'user_id': MAIN_ADMIN_ID},
+        {'$set': {'user_id': MAIN_ADMIN_ID}},
+        upsert=True
+    )
     await dp.start_polling()
 
 if __name__ == '__main__':
