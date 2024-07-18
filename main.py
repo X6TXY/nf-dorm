@@ -1,3 +1,5 @@
+# 18 July 18:49
+
 import asyncio
 import os
 from aiogram import Bot, Dispatcher, types
@@ -36,28 +38,52 @@ class AdminStates(StatesGroup):
 class WashingMachineStates(StatesGroup):
     waiting_for_status = State()
 
-# Create keyboard markup
-attendance_markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-attendance_markup.add(KeyboardButton("Present"), KeyboardButton("Absent"), KeyboardButton("I'm late"))
+# Create main menu keyboard
+async def get_main_menu_markup(user_id):
+    main_menu_markup = InlineKeyboardMarkup()
+    main_menu_markup.row(InlineKeyboardButton("Mark Attendance", callback_data="attendance"))
+    main_menu_markup.row(InlineKeyboardButton("Washing Machines", callback_data="washing_machines"))
+    if await is_admin(user_id):
+        main_menu_markup.row(InlineKeyboardButton("Admin Menu", callback_data="admin_menu"))
+    return main_menu_markup
+
+# Create admin menu keyboard
+admin_menu_markup = InlineKeyboardMarkup()
+admin_menu_markup.row(InlineKeyboardButton("Generate Report", callback_data="generate_report"))
+admin_menu_markup.row(InlineKeyboardButton("Add Admin", callback_data="add_admin"))
+admin_menu_markup.row(InlineKeyboardButton("List Admins", callback_data="list_admins"))
+admin_menu_markup.row(InlineKeyboardButton("Back to Main Menu", callback_data="main_menu"))
 
 @dp.message_handler(commands=['start', 'help'])
 async def send_welcome(message: types.Message):
-    await message.reply("Welcome! Use /attendance to mark your attendance for today. Use /washing_machines to check or update washing machine status.")
+    markup = await get_main_menu_markup(message.from_user.id)
+    await message.reply("Welcome! Please select an option:", reply_markup=markup)
 
-@dp.message_handler(commands=['attendance'])
-async def start_attendance(message: types.Message):
+@dp.callback_query_handler(lambda c: c.data == 'main_menu')
+async def main_menu(callback_query: types.CallbackQuery):
+    markup = await get_main_menu_markup(callback_query.from_user.id)
+    await callback_query.message.edit_text("Main Menu:", reply_markup=markup)
+
+@dp.callback_query_handler(lambda c: c.data == 'attendance')
+async def start_attendance(callback_query: types.CallbackQuery):
+    attendance_markup = InlineKeyboardMarkup()
+    attendance_markup.row(InlineKeyboardButton("Present", callback_data="present"))
+    attendance_markup.row(InlineKeyboardButton("Absent", callback_data="absent"))
+    attendance_markup.row(InlineKeyboardButton("I'm late", callback_data="late"))
     await AttendanceStates.waiting_for_confirmation.set()
-    await message.reply("What's your attendance status for today?", reply_markup=attendance_markup)
+    await callback_query.message.edit_text("What's your attendance status for today?", reply_markup=attendance_markup)
 
-@dp.message_handler(state=AttendanceStates.waiting_for_confirmation)
-async def process_attendance(message: types.Message, state: FSMContext):
-    if message.text not in ['Present', 'Absent', "I'm late"]:
-        await message.reply("Please use the provided buttons to respond.")
+@dp.callback_query_handler(state=AttendanceStates.waiting_for_confirmation)
+async def process_attendance(callback_query: types.CallbackQuery, state: FSMContext):
+    status_map = {'present': 'Present', 'absent': 'Absent', 'late': "I'm late"}
+    status = status_map.get(callback_query.data)
+    
+    if not status:
+        await callback_query.answer("Invalid option. Please try again.")
         return
 
-    user_id = message.from_user.id
-    username = message.from_user.username
-    status = message.text
+    user_id = callback_query.from_user.id
+    username = callback_query.from_user.username
     date = datetime.now().strftime("%Y-%m-%d")
 
     attendance = {
@@ -74,16 +100,25 @@ async def process_attendance(message: types.Message, state: FSMContext):
     )
 
     await state.finish()
-    await message.reply(f"Your attendance has been recorded as '{status}'. Thank you!", reply_markup=types.ReplyKeyboardRemove())
+    await callback_query.message.edit_text(f"Your attendance has been recorded as '{status}'. Thank you!")
+    markup = await get_main_menu_markup(user_id)
+    await callback_query.message.answer("What would you like to do next?", reply_markup=markup)
 
 async def is_admin(user_id: int) -> bool:
     admin = await db.admins.find_one({'user_id': user_id})
     return admin is not None
 
-@dp.message_handler(commands=['report'])
-async def send_report(message: types.Message):
-    if not await is_admin(message.from_user.id):
-        await message.reply("Sorry, only admins can access the attendance report.")
+@dp.callback_query_handler(lambda c: c.data == 'admin_menu')
+async def admin_menu(callback_query: types.CallbackQuery):
+    if not await is_admin(callback_query.from_user.id):
+        await callback_query.answer("Sorry, only admins can access this menu.")
+        return
+    await callback_query.message.edit_text("Admin Menu:", reply_markup=admin_menu_markup)
+
+@dp.callback_query_handler(lambda c: c.data == 'generate_report')
+async def send_report(callback_query: types.CallbackQuery):
+    if not await is_admin(callback_query.from_user.id):
+        await callback_query.answer("Sorry, only admins can access the attendance report.")
         return
 
     date = datetime.now().strftime("%Y-%m-%d")
@@ -110,16 +145,17 @@ async def send_report(message: types.Message):
     report += "Absent:\n" + "\n".join(absent_list) + f"\n\nTotal Absent: {len(absent_list)}\n\n"
     report += "Late:\n" + "\n".join(late_list) + f"\n\nTotal Late: {len(late_list)}"
 
-    await message.reply(report)
+    await callback_query.message.answer(report)
+    await callback_query.message.answer("Admin Menu:", reply_markup=admin_menu_markup)
 
-@dp.message_handler(commands=['add_admin'])
-async def start_add_admin(message: types.Message):
-    if message.from_user.id != MAIN_ADMIN_ID:
-        await message.reply("Sorry, only the main admin can add new admins.")
+@dp.callback_query_handler(lambda c: c.data == 'add_admin')
+async def start_add_admin(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != MAIN_ADMIN_ID:
+        await callback_query.answer("Sorry, only the main admin can add new admins.")
         return
 
     await AdminStates.waiting_for_new_admin_id.set()
-    await message.reply("Please enter the user ID of the new admin.")
+    await callback_query.message.edit_text("Please enter the user ID of the new admin.")
 
 @dp.message_handler(state=AdminStates.waiting_for_new_admin_id)
 async def process_new_admin(message: types.Message, state: FSMContext):
@@ -137,11 +173,12 @@ async def process_new_admin(message: types.Message, state: FSMContext):
 
     await state.finish()
     await message.reply(f"User with ID {new_admin_id} has been added as an admin.")
+    await message.answer("Admin Menu:", reply_markup=admin_menu_markup)
 
-@dp.message_handler(commands=['list_admins'])
-async def list_admins(message: types.Message):
-    if not await is_admin(message.from_user.id):
-        await message.reply("Sorry, only admins can view the list of admins.")
+@dp.callback_query_handler(lambda c: c.data == 'list_admins')
+async def list_admins(callback_query: types.CallbackQuery):
+    if not await is_admin(callback_query.from_user.id):
+        await callback_query.answer("Sorry, only admins can view the list of admins.")
         return
 
     cursor = db.admins.find()
@@ -149,14 +186,16 @@ async def list_admins(message: types.Message):
     async for doc in cursor:
         admin_list.append(f"- User ID: {doc['user_id']}")
 
-    await message.reply("\n".join(admin_list))
+    await callback_query.message.answer("\n".join(admin_list))
+    await callback_query.message.answer("Admin Menu:", reply_markup=admin_menu_markup)
 
-@dp.message_handler(commands=['washing_machines'])
-async def washing_machines_menu(message: types.Message):
+@dp.callback_query_handler(lambda c: c.data == 'washing_machines')
+async def washing_machines_menu(callback_query: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup()
     keyboard.add(InlineKeyboardButton("Check Availability", callback_data="check_washing_machines"))
     keyboard.add(InlineKeyboardButton("Update Status", callback_data="update_washing_machines"))
-    await message.reply("Washing Machines Menu:", reply_markup=keyboard)
+    keyboard.add(InlineKeyboardButton("Back to Main Menu", callback_data="main_menu"))
+    await callback_query.message.edit_text("Washing Machines Menu:", reply_markup=keyboard)
 
 @dp.callback_query_handler(lambda c: c.data == 'check_washing_machines')
 async def check_washing_machines(callback_query: types.CallbackQuery):
@@ -169,7 +208,8 @@ async def check_washing_machines(callback_query: types.CallbackQuery):
     else:
         message = "No information available about washing machines."
     await callback_query.answer()
-    await callback_query.message.reply(message)
+    await callback_query.message.answer(message)
+    await callback_query.message.answer("Washing Machines Menu:", reply_markup=callback_query.message.reply_markup)
 
 @dp.callback_query_handler(lambda c: c.data == 'update_washing_machines')
 async def update_washing_machines(callback_query: types.CallbackQuery):
@@ -178,7 +218,7 @@ async def update_washing_machines(callback_query: types.CallbackQuery):
     keyboard.add(InlineKeyboardButton("Available", callback_data="washing_available"))
     keyboard.add(InlineKeyboardButton("Not Available", callback_data="washing_not_available"))
     await callback_query.answer()
-    await callback_query.message.reply("Are the washing machines available?", reply_markup=keyboard)
+    await callback_query.message.edit_text("Are the washing machines available?", reply_markup=keyboard)
 
 @dp.callback_query_handler(lambda c: c.data.startswith('washing_'), state=WashingMachineStates.waiting_for_status)
 async def process_washing_machine_status(callback_query: types.CallbackQuery, state: FSMContext):
@@ -195,7 +235,8 @@ async def process_washing_machine_status(callback_query: types.CallbackQuery, st
     await state.finish()
     await callback_query.answer("Thank you for updating the washing machine status!")
     status_text = "available" if status else "not available"
-    await callback_query.message.reply(f"Washing machines are now marked as {status_text}.")
+    await callback_query.message.edit_text(f"Washing machines are now marked as {status_text}.")
+    await callback_query.message.answer("Washing Machines Menu:", reply_markup=callback_query.message.reply_markup)
 
 async def main():
     # Ensure main admin is in the database
