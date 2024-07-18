@@ -32,7 +32,7 @@ class AttendanceStates(StatesGroup):
 
 # Create keyboard markup
 attendance_markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-attendance_markup.add(KeyboardButton("Present"), KeyboardButton("Absent"))
+attendance_markup.add(KeyboardButton("Present"), KeyboardButton("Absent"), KeyboardButton("I'm late"))
 
 @dp.message_handler(commands=['start', 'help'])
 async def send_welcome(message: types.Message):
@@ -41,24 +41,24 @@ async def send_welcome(message: types.Message):
 @dp.message_handler(commands=['attendance'])
 async def start_attendance(message: types.Message):
     await AttendanceStates.waiting_for_confirmation.set()
-    await message.reply("Are you present today?", reply_markup=attendance_markup)
+    await message.reply("What's your attendance status for today?", reply_markup=attendance_markup)
 
 @dp.message_handler(state=AttendanceStates.waiting_for_confirmation)
 async def process_attendance(message: types.Message, state: FSMContext):
-    if message.text not in ['Present', 'Absent']:
+    if message.text not in ['Present', 'Absent', "I'm late"]:
         await message.reply("Please use the provided buttons to respond.")
         return
 
     user_id = message.from_user.id
     username = message.from_user.username
-    is_present = message.text == 'Present'
+    status = message.text
     date = datetime.now().strftime("%Y-%m-%d")
 
     attendance = {
         'user_id': user_id,
         'username': username,
         'date': date,
-        'is_present': is_present
+        'status': status
     }
 
     await db.attendance.update_one(
@@ -68,7 +68,7 @@ async def process_attendance(message: types.Message, state: FSMContext):
     )
 
     await state.finish()
-    await message.reply("Your attendance has been recorded. Thank you!", reply_markup=types.ReplyKeyboardRemove())
+    await message.reply(f"Your attendance has been recorded as '{status}'. Thank you!", reply_markup=types.ReplyKeyboardRemove())
 
 @dp.message_handler(commands=['report'])
 async def send_report(message: types.Message):
@@ -80,18 +80,21 @@ async def send_report(message: types.Message):
     cursor = db.attendance.find({'date': date})
     report = f"Attendance Report for {date}:\n\n"
 
-    present_count = 0
-    absent_count = 0
+    present_list = []
+    absent_list = []
+    late_list = []
 
     async for doc in cursor:
-        status = "Present" if doc['is_present'] else "Absent"
-        report += f"User: {doc['username']} (ID: {doc['user_id']}) - {status}\n"
-        if doc['is_present']:
-            present_count += 1
-        else:
-            absent_count += 1
+        if doc['status'] == 'Present':
+            present_list.append(f"- {doc['username']} (ID: {doc['user_id']})")
+        elif doc['status'] == 'Absent':
+            absent_list.append(f"- {doc['username']} (ID: {doc['user_id']})")
+        else:  # Late
+            late_list.append(f"- {doc['username']} (ID: {doc['user_id']})")
 
-    report += f"\nSummary:\nPresent: {present_count}\nAbsent: {absent_count}"
+    report += "Present:\n" + "\n".join(present_list) + f"\n\nTotal Present: {len(present_list)}\n\n"
+    report += "Absent:\n" + "\n".join(absent_list) + f"\n\nTotal Absent: {len(absent_list)}\n\n"
+    report += "Late:\n" + "\n".join(late_list) + f"\n\nTotal Late: {len(late_list)}"
 
     await message.reply(report)
 
