@@ -4,7 +4,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime
 from dotenv import load_dotenv
@@ -33,13 +33,16 @@ class AttendanceStates(StatesGroup):
 class AdminStates(StatesGroup):
     waiting_for_new_admin_id = State()
 
+class WashingMachineStates(StatesGroup):
+    waiting_for_status = State()
+
 # Create keyboard markup
 attendance_markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
 attendance_markup.add(KeyboardButton("Present"), KeyboardButton("Absent"), KeyboardButton("I'm late"))
 
 @dp.message_handler(commands=['start', 'help'])
 async def send_welcome(message: types.Message):
-    await message.reply("Welcome! Use /attendance to mark your attendance for today.")
+    await message.reply("Welcome! Use /attendance to mark your attendance for today. Use /washing_machines to check or update washing machine status.")
 
 @dp.message_handler(commands=['attendance'])
 async def start_attendance(message: types.Message):
@@ -92,7 +95,7 @@ async def send_report(message: types.Message):
     late_list = []
 
     async for doc in cursor:
-        status = doc.get('status', 'Unknown')  # Use get() method with a default value
+        status = doc.get('status', 'Unknown')
         username = doc.get('username', 'Unknown')
         user_id = doc.get('user_id', 'Unknown')
 
@@ -147,6 +150,52 @@ async def list_admins(message: types.Message):
         admin_list.append(f"- User ID: {doc['user_id']}")
 
     await message.reply("\n".join(admin_list))
+
+@dp.message_handler(commands=['washing_machines'])
+async def washing_machines_menu(message: types.Message):
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(InlineKeyboardButton("Check Availability", callback_data="check_washing_machines"))
+    keyboard.add(InlineKeyboardButton("Update Status", callback_data="update_washing_machines"))
+    await message.reply("Washing Machines Menu:", reply_markup=keyboard)
+
+@dp.callback_query_handler(lambda c: c.data == 'check_washing_machines')
+async def check_washing_machines(callback_query: types.CallbackQuery):
+    washing_machines = await db.washing_machines.find_one({'_id': 'status'})
+    if washing_machines and 'available' in washing_machines:
+        status = "available" if washing_machines['available'] else "not available"
+        updated_by = washing_machines.get('updated_by', 'Unknown')
+        updated_at = washing_machines.get('updated_at', 'Unknown time')
+        message = f"Washing machines are currently {status}.\nLast updated by: {updated_by}\nLast updated at: {updated_at}"
+    else:
+        message = "No information available about washing machines."
+    await callback_query.answer()
+    await callback_query.message.reply(message)
+
+@dp.callback_query_handler(lambda c: c.data == 'update_washing_machines')
+async def update_washing_machines(callback_query: types.CallbackQuery):
+    await WashingMachineStates.waiting_for_status.set()
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(InlineKeyboardButton("Available", callback_data="washing_available"))
+    keyboard.add(InlineKeyboardButton("Not Available", callback_data="washing_not_available"))
+    await callback_query.answer()
+    await callback_query.message.reply("Are the washing machines available?", reply_markup=keyboard)
+
+@dp.callback_query_handler(lambda c: c.data.startswith('washing_'), state=WashingMachineStates.waiting_for_status)
+async def process_washing_machine_status(callback_query: types.CallbackQuery, state: FSMContext):
+    status = callback_query.data == 'washing_available'
+    await db.washing_machines.update_one(
+        {'_id': 'status'},
+        {'$set': {
+            'available': status,
+            'updated_by': callback_query.from_user.username,
+            'updated_at': datetime.now()
+        }},
+        upsert=True
+    )
+    await state.finish()
+    await callback_query.answer("Thank you for updating the washing machine status!")
+    status_text = "available" if status else "not available"
+    await callback_query.message.reply(f"Washing machines are now marked as {status_text}.")
 
 async def main():
     # Ensure main admin is in the database
